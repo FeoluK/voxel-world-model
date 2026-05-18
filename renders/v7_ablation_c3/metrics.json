@@ -1,0 +1,44 @@
+{
+  "chunk_idx": 3,
+  "target": "vpred",
+  "ckpt": "/vol/abl/v7_abl/v7_ckpt_step13139.pt",
+  "ckpt_step": 13139,
+  "metrics": {
+    "normal": {
+      "latent_mse": 1.6832587718963623,
+      "acc_all": 0.8356788369809203,
+      "acc_nonair": 0.7042620963297697,
+      "elapsed_s": 4.423429250717163
+    },
+    "zero_clip": {
+      "latent_mse": 1.6858140230178833,
+      "acc_all": 0.8333593640397026,
+      "acc_nonair": 0.6987203791469194,
+      "elapsed_s": 5.422987937927246
+    },
+    "zero_clip_post_first": {
+      "latent_mse": 1.6686497926712036,
+      "acc_all": 0.8353793468539562,
+      "acc_nonair": 0.702950512509644,
+      "elapsed_s": 4.410294055938721
+    },
+    "zero_cond_concat": {
+      "latent_mse": 7.999122619628906,
+      "acc_all": 0.24133424084595959,
+      "acc_nonair": 0.43707263308718175,
+      "elapsed_s": 5.425293922424316
+    },
+    "zero_position": {
+      "latent_mse": 1.5100979804992676,
+      "acc_all": 0.8521464098449776,
+      "acc_nonair": 0.7352981373305412,
+      "elapsed_s": 5.030596494674683
+    },
+    "reverse_position": {
+      "latent_mse": 1.6645548343658447,
+      "acc_all": 0.8348288659161055,
+      "acc_nonair": 0.703702193320842,
+      "elapsed_s": 6.6110680103302
+    }
+  }
+}
