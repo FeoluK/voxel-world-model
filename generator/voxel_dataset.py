@@ -53,10 +53,13 @@ from torch.utils.data import Dataset, get_worker_info
 # ---------------------------------------------------------------------------
 # Paths (on farmshare).
 # ---------------------------------------------------------------------------
-VOXEL_LAT_DIR = "/scratch/users/flukol/mg_pt_voxel/extract/latents"
-RGB_LAT_DIR = "/scratch/users/flukol/mg_pt_voxel/extract/rgb_latents"
-JSONL_DIR = "/scratch/users/flukol/vpt_solaris/vpt/v6"
-CLIP_DIR = "/scratch/users/flukol/mg_pt_voxel/extract/clip_features_h"
+# Paths are env-overridable so the same file runs on FarmShare and the H100
+# cluster (where data lives under /home/flukol/v12). Defaults = FarmShare.
+_V12_ROOT = os.environ.get("V12_ROOT", "/scratch/users/flukol/mg_pt_voxel")
+VOXEL_LAT_DIR = os.environ.get("V12_VOXEL_LAT_DIR", _V12_ROOT + "/extract/latents")
+RGB_LAT_DIR = os.environ.get("V12_RGB_LAT_DIR", _V12_ROOT + "/extract/rgb_latents")
+JSONL_DIR = os.environ.get("V12_JSONL_DIR", "/scratch/users/flukol/vpt_solaris/vpt/v6")
+CLIP_DIR = os.environ.get("V12_CLIP_DIR", _V12_ROOT + "/extract/clip_features_h")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +254,7 @@ class VoxelDiTDataset(Dataset):
         clip_dir: Optional[str] = None,
         clip_pf_dir: Optional[str] = None,         # v7: per-frame CLIP CLS (n_frames, 1280) — used if set
         require_rgb: bool = True,
+        require_jsonl: bool = True,
         require_clip: bool = False,
         require_clip_pf: bool = False,             # v7: filter to episodes with per-frame CLIP
         verbose: bool = False,
@@ -272,6 +276,7 @@ class VoxelDiTDataset(Dataset):
         self.voxel_lat_dir = voxel_lat_dir
         self.rgb_lat_dir = rgb_lat_dir
         self.jsonl_dir = jsonl_dir
+        self.require_jsonl = require_jsonl
         self.clip_dir = clip_dir
         self.clip_pf_dir = clip_pf_dir
         self.require_rgb = require_rgb
@@ -320,7 +325,7 @@ class VoxelDiTDataset(Dataset):
         for vf in vox_files:
             base = Path(vf).stem
             jsonl_path = os.path.join(jsonl_dir, base + ".jsonl")
-            if not os.path.exists(jsonl_path):
+            if require_jsonl and not os.path.exists(jsonl_path):
                 continue
             has_rgb = (base + ".npz") in rgb_set
             if require_rgb and not has_rgb:
@@ -399,11 +404,17 @@ class VoxelDiTDataset(Dataset):
             n_frames_voxel = vox_lat.shape[0]
 
             jsonl_path = os.path.join(self.jsonl_dir, base + ".jsonl")
-            records = _read_jsonl(jsonl_path)
-            n_use = min(n_frames_voxel, len(records))
-            if n_use < self.clip_len:
-                return None
-            mouse, keyboard, camera = _extract_actions_camera(records, n_use)
+            records = _read_jsonl(jsonl_path) if os.path.exists(jsonl_path) else []
+            if not records and not self.require_jsonl:
+                n_use = n_frames_voxel
+                mouse = np.zeros((n_use, 2), np.float32)
+                keyboard = np.zeros((n_use, 23), np.float32)
+                camera = np.zeros((n_use, 5), np.float32)
+            else:
+                n_use = min(n_frames_voxel, len(records))
+                if n_use < self.clip_len:
+                    return None
+                mouse, keyboard, camera = _extract_actions_camera(records, n_use)
 
             rgb_lat = None
             rgb_path = os.path.join(self.rgb_lat_dir, base + ".npz")
@@ -488,8 +499,10 @@ class VoxelDiTDataset(Dataset):
         # Floor to chunk-aligned start to keep RGB indexing exact.
         START_OFFSET = 200
         c_min = (START_OFFSET + self.rgb_chunk - 1) // self.rgb_chunk  # ceil
-        c_min = min(c_min, n_chunks - 1)  # don't filter all chunks if episode short
-        c = int(self._rng.integers(c_min, n_chunks)) if n_chunks > c_min else int(self._rng.integers(n_chunks))
+        span = self.clip_len // self.rgb_chunk  # chunks the clip spans (1 for clip_len=33)
+        c_hi = max(1, n_chunks - (span - 1))      # H64 FIX: ensure all `span` chunks fit before episode end
+        c_min = min(c_min, c_hi - 1)
+        c = int(self._rng.integers(c_min, c_hi)) if c_hi > c_min else int(self._rng.integers(c_hi))
         t0 = c * self.rgb_chunk
         t1 = t0 + self.clip_len
 
@@ -519,6 +532,7 @@ class VoxelDiTDataset(Dataset):
 
         mouse_clip = d["mouse"][t0:t1].copy()       # (33, 2)
         keyboard_clip = d["keyboard"][t0:t1].copy() # (33, 23)
+        raw_camera_clip = d["camera"][t0:t1].copy().astype("float32")  # (33,5) UNNORMALIZED xpos,ypos,zpos,yaw,pitch
         camera_clip = normalize_camera(d["camera"][t0:t1])  # (33, 5)
 
         # v7: prefer per-frame CLIP CLS if available. Slice [t0+1:t1+1] to match
@@ -545,6 +559,7 @@ class VoxelDiTDataset(Dataset):
             actions_mouse=torch.from_numpy(mouse_clip),         # fp32
             actions_keyboard=torch.from_numpy(keyboard_clip),    # fp32
             camera=torch.from_numpy(camera_clip),                # fp32
+            raw_camera=torch.from_numpy(raw_camera_clip),        # fp32 UNNORMALIZED
         )
 
     # ------------------------------------------------------------------
@@ -557,6 +572,7 @@ class VoxelDiTDataset(Dataset):
             actions_mouse=torch.zeros(self.clip_len, 2),
             actions_keyboard=torch.zeros(self.clip_len, 23),
             camera=torch.zeros(self.clip_len, 5),
+            raw_camera=torch.zeros(self.clip_len, 5),
         )
 
 

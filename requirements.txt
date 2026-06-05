@@ -1,8 +1,8 @@
-# Core (training/eval ran on CUDA, torch 2.x, 4×L40S under torchrun DDP)
 torch>=2.1
 numpy
-# Data/eval utilities
+pillow
+imageio
+imageio-ffmpeg
 einops
 tqdm
-# Note: training data, encoded latents, and model checkpoints are NOT in this
-# repo (cluster storage). This repo is a code + results checkpoint.
+# Wan2.1 VAE (RGB latent decode) + nvcr.io pytorch:24.12 container for cluster runs

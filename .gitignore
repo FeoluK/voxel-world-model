@@ -1,19 +1,10 @@
-# weights / checkpoints (live on cluster, ~14GB each)
-*.pt
-*.pth
-*.ckpt
-
-# data / latents (~155GB, off-repo)
-*.npz
-*.npy
-data/
-latents/
-extract/
-
-# python
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
-
-# os
+*.pt
+*.ckpt
+*.npz
+!generator/voxel_vocab_treechop.npz
+*.mp4
+*.out
+*.log
 .DS_Store

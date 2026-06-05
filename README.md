@@ -1,70 +1,102 @@
-# Voxel World Model — v7 checkpoint
+# Persistent 3D World Models
 
-A generative 3D world model for embodied agents. A diffusion transformer
-predicts how a voxel world evolves over time, conditioned on a single
-first-frame 3D anchor plus the agent's action/position trajectory — operating
-directly in 3D rather than on rendered 2D frames.
+**Beyond pixel histories — generate the world in 3D, then put a camera inside it.**
 
-This repository is a **progress checkpoint**, not a turnkey runnable repo. The
-training data (~155 GB of extracted Minecraft-style voxel sequences), encoded
-latents, and model weights (~14 GB per checkpoint) live on cluster storage and
-are intentionally **not** committed here. What is here is the model/training/
-evaluation code and demonstration media for our best model to date ("v7").
+Most "world models" (Oasis, Genie) generate **2D pixels** frame-by-frame, so there is no world underneath — only a video. Look away and back, and that region is re-hallucinated, different every time. This project takes the opposite approach: **generate a real 3D voxel world, then render RGB from a camera placed inside it.** Persistence is then free — the geometry is literally stored.
 
-## Result (v7, 270M params, v-prediction)
+![hero](assets/hero.png)
 
-Evaluated on held-out chunks the model never trained on. Numbers below are for
-a representative walking chunk (`renders/v7_ablation_c3/metrics.json`):
+---
 
-| condition            | acc_all | acc_nonair | note |
-|----------------------|---------|------------|------|
-| **full conditioning**| **0.836** | **0.704** | model vs ground truth |
-| zero 3D anchor       | 0.241   | 0.437      | **−0.59 acc_all** — anchor is load-bearing |
-| zero CLIP context    | 0.833   | 0.699      | small effect |
-| zero position        | 0.852   | 0.735      | position not dominant on low-motion chunks |
+## TL;DR
 
-Across the broader held-out pool, per-voxel accuracy reaches **~80% (acc_all)**
-and **0.69–0.84 (non-air)**, up to ~0.99 on low-motion sequences. The large
-collapse when the 3D anchor is removed confirms the model learns real world
-structure, not a trivial prior.
+- **A 3D VAE** compresses 48³ Minecraft voxel chunks into a compact latent.
+- **A 3D MaskGIT generator** creates and extends the voxel world as an agent moves.
+- **A rectified-flow renderer** rasterizes the voxels from the camera pose and turns them into photorealistic RGB.
+- Trained on VPT / MineRL *treechop* human-play data; runs on H100s via Slurm.
 
-See `renders/v7_ablation_c3/` for side-by-side videos:
-- `GT.mp4` — ground-truth voxel evolution
-- `normal.mp4` — model prediction (full conditioning)
-- `compare_zero_cond_concat.mp4` — prediction with the 3D anchor removed (collapses)
-- `compare_zero_position.mp4` — prediction with the position trajectory removed
+---
 
-`results/v7_vs_v12_loss.png` — training loss curves (v7 vs the in-progress
-simplified v12 variant).
+## The system
 
-## Code (`src/`)
+![architecture](assets/architecture.png)
 
-| file | role |
-|------|------|
-| `voxel_dit_solaris_v7.py` | v7 entry point — re-exports the v6 architecture |
-| `voxel_dit_solaris_v6.py` | the actual diffusion-transformer model |
-| `train_voxel_dit_solaris_vpred_v7.py` | training loop (v-prediction, DDP) |
-| `ablate_solaris_pool_v7.py` | evaluation/ablation harness (produces the demo media + metrics) |
-| `voxel_dataset.py` | dataset loader for extracted voxel-latent sequences |
-| `vae_3d.py` | 3D VAE used to decode predicted latents back to voxel ids |
-| `global_palette.json` | voxel-id ↔ block-name mapping |
-| `run_fulldata_v_v7.sh` | exact training launch (hyperparameters: 4×GPU, eff. batch 32, lr 5e-4, warmup 2000, v-pred) |
+1. **VAE₃D** (`generator/vae_3d.py`) — 48³ voxels → latent.
+2. **MaskGIT generator** (`generator/voxel_maskgit.py`) — autoregressively generates / extends the 3D world (world-shift + frontier fill).
+3. **Renderer** (`renderer/renderer_flow.py` + `renderer/renderer_explicit.py`) — rasterize the 3D from the camera, then a rectified-flow DiT → RGB.
 
-## Architecture (brief)
+---
 
-- 270M-parameter diffusion transformer operating on a 3D voxel latent space
-  (a 48³ voxel grid encoded to 12³ latents by a 3D VAE).
-- Conditioning: first-frame voxel anchor (`cond_concat`), agent position
-  trajectory (`position_cond`), and pooled visual context.
-- v-prediction objective; bidirectional (full-sequence) training. Making the
-  model autoregressive and then self-forcing is the next phase of work.
+## The core research result: fixing rollout collapse
 
-## Status / next steps
+Naive autoregression **collapses** — running the generator on its own output for many steps compounds errors until the world degenerates into grey stone. The fix is **self-forcing** (DAgger-style): during training, feed the model its own generations and force it to recover toward ground truth.
 
-The model is currently **bidirectional** — it sees the whole sequence at once,
-which is good for learning but cannot generate forward in time. Planned work:
-make it **autoregressive** (predict each step from only the past), then add
-**self-forcing** (train on the model's own rollouts to stop error
-accumulation), then build a **renderer** that projects the predicted 3D world
-back into an agent's first-person view — enabling the multi-agent setting where
-separate agents act in and observe one shared predicted world.
+![collapse to self-forcing](assets/collapse_to_selfforcing.png)
+
+With self-forcing the rollout stays diverse across a full 64-frame horizon (distinct block types retained 14 → 21; non-air accuracy 0.83 → 0.92).
+
+---
+
+## The renderer is ground-truth quality
+
+Camera placed *inside* the generated 3D world; **gold** voxels = what the camera can see. Middle is ground truth, right is our render — they match to within ~1% on high-frequency detail.
+
+![renderer camera visibility](assets/renderer_camera_visibility.png)
+
+---
+
+## Persistence demo
+
+One model-generated 3D world. The agent walks **15 blocks out and back in every direction** (WASD tracks the motion). Every time it returns to center the world is **100% bit-identical** — a generated world that *remembers* what it generated.
+
+![persistence demo](assets/persistence_demo.gif)
+
+---
+
+## Repo layout
+
+```
+generator/   3D VAE, MaskGIT model, self-forcing + Stage-C (temporal) trainers, eval, vocab
+renderer/    rectified-flow renderer + rasterizer, render trainers, validation
+viz/         isometric voxel renderer + the camera-visibility / persistence-demo tooling
+slurm/       Slurm launchers (nvcr.io pytorch container, single-node ≤8 GPU)
+slides/      final presentation (PDF + PPTX)
+assets/      figures used in this README
+```
+
+Key files:
+- `generator/train_v14_sf.py` — self-forcing generator trainer (the one that fixes collapse).
+- `generator/train_v14_stageC.py` — temporal long-horizon (up to 64-frame) self-forcing.
+- `generator/eval_v14.py` — autoregressive rollout / evaluation.
+- `renderer/renderer_flow.py`, `renderer/train_render_v3.py` — flow renderer + training.
+- `viz/gen_persist_rollout.py`, `viz/build_persist_demo.py`, `viz/panel_a.py` — the persistence demo.
+
+---
+
+## Running
+
+Training/eval run inside the `nvcr.io#nvidia/pytorch:24.12-py3` container via Slurm (single node, ≤8 GPU):
+
+```bash
+# build the voxel vocabulary
+sbatch slurm/run_buildvocab.sbatch
+# train the self-forcing generator
+sbatch slurm/run_tcgen2.sbatch          # generator (slab-mask self-forcing)
+sbatch slurm/run_stageC.sbatch          # temporal long-horizon self-forcing
+# train the renderer
+sbatch slurm/run_render_v3.sbatch
+# roll out + evaluate
+python generator/eval_v14.py --ckpt <ckpt> --out <dir> --temp 0.6 --long 64
+```
+
+(Set `V12_VOXEL_LAT_DIR`, `V12_JSONL_DIR`, `V14_VOCAB`, `VOX_VAE`, Wan VAE paths as in the Slurm scripts.)
+
+---
+
+## Notes & honesty
+
+- **Model weights are not in the repo** (VAE / generator / renderer checkpoints are hundreds of MB) — available on request.
+- The persistence demo uses a **lossless persistent canvas**: the generator fills the world once, then traversal is integer slicing, so return-to-center is exact. Freshly-generated frontier is sparser than the seed center (real model behavior, shown as-is).
+- Data is *treechop* (grass / dirt / stone / sparse trees + water), so generated terrain matches that distribution.
+
+CS153 final project.
